@@ -19,6 +19,7 @@ const OPPONENT_SPEED = 3;
 const BALL_TOSS_DISTANCE = 150;
 const BALL_TOSS_DURATION = 40; // frames for toss animation
 const TRAIL_LENGTH = 5;
+const PICKUP_RADIUS = 30;
 
 // Joystick area
 const JOYSTICK_RADIUS = 100;
@@ -63,9 +64,18 @@ export default function App() {
     active: false,
     direction: null,
     frame: 0,
+    startX: 0,
     startY: 0,
+    targetX: 0,
     targetY: 0,
   });
+
+  // Helper: circle hit test
+  const pointInCircle = (px, py, cx, cy, r) => {
+    const dx = px - cx;
+    const dy = py - cy;
+    return dx * dx + dy * dy <= r * r;
+  };
 
   const panResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
@@ -73,22 +83,34 @@ export default function App() {
       handleJoystick(evt.nativeEvent);
       const x = evt.nativeEvent.locationX;
       const y = evt.nativeEvent.locationY;
-      // --- Ball toss controls ---
-      if (x > SCREEN_WIDTH * 0.7 && y > SCREEN_HEIGHT * 0.6) {
-        const relativeY = y - SCREEN_HEIGHT * 0.6;
-        const tossDirection = relativeY < 40 ? "up" : "down";
 
-        if (!tossRef.current.active) {
-          tossRef.current = {
-            active: true,
-            direction: tossDirection,
-            frame: 0,
-            startY: entities.ball.y,
-            targetY:
-              tossDirection === "up"
-                ? entities.ball.y - BALL_TOSS_DISTANCE
-                : entities.ball.y + BALL_TOSS_DISTANCE,
-          };
+      // Robust hit test for toss-up button
+      if (pointInCircle(x, y, BALL_UP_X, BALL_UP_Y, BALL_UP_RADIUS)) {
+        // Start toss up
+        if (!tossRef.current.active && playerHasBall) {
+          tossRef.current.active = true;
+          tossRef.current.direction = "up";
+          tossRef.current.frame = 0;
+          tossRef.current.startX = entities.ball.x;
+          tossRef.current.startY = entities.ball.y;
+          tossRef.current.targetX = entities.ball.x; // keep X stationary for now
+          tossRef.current.targetY = entities.ball.y - BALL_TOSS_DISTANCE;
+          setPlayerHasBall(false);
+        }
+      }
+
+      // Robust hit test for toss-down button
+      if (pointInCircle(x, y, BALL_DOWN_X, BALL_DOWN_Y, BALL_DOWN_RADIUS)) {
+        // Start toss down
+        if (!tossRef.current.active && playerHasBall) {
+          tossRef.current.active = true;
+          tossRef.current.direction = "down";
+          tossRef.current.frame = 0;
+          tossRef.current.startX = entities.ball.x;
+          tossRef.current.startY = entities.ball.y;
+          tossRef.current.targetX = entities.ball.x;
+          tossRef.current.targetY = entities.ball.y + BALL_TOSS_DISTANCE;
+          setPlayerHasBall(false);
         }
       }
     },
@@ -106,8 +128,11 @@ export default function App() {
 
     if (distance <= JOYSTICK_RADIUS) {
       const scale = Math.min(distance / JOYSTICK_RADIUS, 1);
-      const dxSpeed = (dx / distance) * scale * PLAYER_MAX_SPEED;
-      const dySpeed = (dy / distance) * scale * PLAYER_MAX_SPEED;
+      // avoid divide-by-zero
+      const nx = distance === 0 ? 0 : dx / distance;
+      const ny = distance === 0 ? 0 : dy / distance;
+      const dxSpeed = nx * scale * PLAYER_MAX_SPEED;
+      const dySpeed = ny * scale * PLAYER_MAX_SPEED;
       setJoystick({ dx: dxSpeed, dy: dySpeed });
 
       // Knob position proportional to distance
@@ -129,32 +154,40 @@ export default function App() {
     newEntities.player.x = Math.max(PLAYER_RADIUS, Math.min(SCREEN_WIDTH - PLAYER_RADIUS, newEntities.player.x + joystick.dx));
     newEntities.player.y = Math.max(PLAYER_RADIUS, Math.min(SCREEN_HEIGHT - PLAYER_RADIUS, newEntities.player.y + joystick.dy));
 
-    // Smooth toss animation
+    // Toss animation (if active)
     if (tossRef.current.active) {
-      const t = tossRef.current.frame / BALL_TOSS_DURATION;
-      const ease = 1 - Math.pow(1 - t, 3); // ease-out cubic
-      const y =
-        tossRef.current.startY +
-        (tossRef.current.targetY - tossRef.current.startY) * ease -
-        Math.sin(t * Math.PI) * 40; // little arc
+      const frame = tossRef.current.frame;
+      const duration = BALL_TOSS_DURATION;
+      const t = Math.min(frame / duration, 1);
+      const ease = 1 - Math.pow(1 - t, 3);
+      const x = tossRef.current.startX + (tossRef.current.targetX - tossRef.current.startX) * ease;
+      const y = tossRef.current.startY + (tossRef.current.targetY - tossRef.current.startY) * ease - Math.sin(t * Math.PI) * 40;
 
+      newEntities.ball.x = x;
       newEntities.ball.y = y;
-      newEntities.ball.x = newEntities.player.x;
+
       tossRef.current.frame++;
 
-      if (tossRef.current.frame >= BALL_TOSS_DURATION) {
+      if (tossRef.current.frame >= duration) {
         tossRef.current.active = false;
+        // ball lands, remains independent
       }
     } else {
-    // Ball follows player if not tossed
-    //if (playerHasBall) {
-      newEntities.ball.y = newEntities.player.y + 5;
-      newEntities.ball.x = newEntities.player.x;
+      // Ball follows player only if playerHasBall === true
+      if (playerHasBall) {
+        newEntities.ball.x = newEntities.player.x;
+        newEntities.ball.y = newEntities.player.y - 30;
+      } else {
+        // Check if player is close enough to pick up the ball
+        const dx = newEntities.player.x - newEntities.ball.x;
+        const dy = newEntities.player.y - newEntities.ball.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < PICKUP_RADIUS) {
+          setPlayerHasBall(true);
+        }
+      }
     }
 
-    // Update trail positions
-    //ballTrail.current.unshift({ x: newEntities.ball.x, y: newEntities.ball.y });
-    //if (ballTrail.current.length > BALL_TRAIL_LENGTH) ballTrail.current.pop();
 
     // Opponent movement
     newEntities.opponent.y += opponentDir * OPPONENT_SPEED;
@@ -184,7 +217,7 @@ export default function App() {
   };
 
   return (
-    <View style={styles.container} {...panResponder.panHandlers} onStartShouldSetResponder={() => true} onResponderGrant={handleTouch}>
+    <View style={styles.container} {...panResponder.panHandlers}>
       <GameEngine style={styles.gameContainer} systems={[UpdateSystem]} entities={entities}>
         {/* Draw control circles */}
         <Svg style={StyleSheet.absoluteFill}>
@@ -199,7 +232,7 @@ export default function App() {
             />
           ))}
 
-          {/* Ball shadow */}
+          {/* Ball shadow while tossing */}
           {tossRef.current.active && (
           <Circle
               cx={entities.ball.x + 5}
@@ -208,6 +241,11 @@ export default function App() {
               fill="rgba(0,0,0,0.2)"
           />
           )}
+
+          {/* Player / ball / opponent renderers */}
+          <Circle cx={entities.player.x} cy={entities.player.y} r={entities.player.r} fill={entities.player.fill} />
+          <Circle cx={entities.ball.x} cy={entities.ball.y} r={entities.ball.r} fill={entities.ball.fill} />
+          <Circle cx={entities.opponent.x} cy={entities.opponent.y} r={entities.opponent.r} fill={entities.opponent.fill} />
 
           {/* Lower-left joystick base */}
           <Circle cx={JOYSTICK_X} cy={JOYSTICK_Y} r={JOYSTICK_RADIUS} fill="rgba(255,255,255,0.2)" />
