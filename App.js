@@ -58,6 +58,8 @@ export default function App() {
   const ballTrail = useRef([]); // Store recent ball positions for the trail
   const [move, setMove] = useState({ x: 0, y: 0 });
   const [trail, setTrail] = useState([]);
+  const joystickFinger = useRef(null);
+
 
   // Toss animation state
   const tossRef = useRef({
@@ -79,47 +81,76 @@ export default function App() {
 
   const panResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
+
     onPanResponderGrant: (evt) => {
-      handleJoystick(evt.nativeEvent);
-      const x = evt.nativeEvent.locationX;
-      const y = evt.nativeEvent.locationY;
+      for (let touch of evt.nativeEvent.touches) {
+        const x = touch.locationX;
+        const y = touch.locationY;
 
-      // Robust hit test for toss-up button
-      if (pointInCircle(x, y, BALL_UP_X, BALL_UP_Y, BALL_UP_RADIUS)) {
-        // Start toss up
-        if (!tossRef.current.active && playerHasBall) {
-          tossRef.current.active = true;
-          tossRef.current.direction = "up";
-          tossRef.current.frame = 0;
-          tossRef.current.startX = entities.ball.x;
-          tossRef.current.startY = entities.ball.y;
-          tossRef.current.targetX = entities.ball.x; // keep X stationary for now
-          tossRef.current.targetY = entities.ball.y - BALL_TOSS_DISTANCE;
-          setPlayerHasBall(false);
+        const dx = x - JOYSTICK_X;
+        const dy = y - JOYSTICK_Y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        const insideJoystick = distance < JOYSTICK_RADIUS;
+        const inTossArea = x > SCREEN_WIDTH * 0.6 && y > SCREEN_HEIGHT * 0.6;
+
+        if (insideJoystick && joystickFinger.current === null) {
+          joystickFinger.current = touch.identifier;
+          handleJoystick(touch);
         }
-      }
 
-      // Robust hit test for toss-down button
-      if (pointInCircle(x, y, BALL_DOWN_X, BALL_DOWN_Y, BALL_DOWN_RADIUS)) {
-        // Start toss down
-        if (!tossRef.current.active && playerHasBall) {
-          tossRef.current.active = true;
-          tossRef.current.direction = "down";
-          tossRef.current.frame = 0;
-          tossRef.current.startX = entities.ball.x;
-          tossRef.current.startY = entities.ball.y;
-          tossRef.current.targetX = entities.ball.x;
-          tossRef.current.targetY = entities.ball.y + BALL_TOSS_DISTANCE;
-          setPlayerHasBall(false);
+        if (inTossArea) {
+          handleBallControl(x, y); // toss immediately
         }
       }
     },
-    onPanResponderMove: (evt) => handleJoystick(evt.nativeEvent),
-    onPanResponderRelease: () => {
-      setJoystick({ dx: 0, dy: 0 });
-      setKnobPos({ x: JOYSTICK_X, y: JOYSTICK_Y });
+
+    onPanResponderMove: (evt) => {
+      const joyID = joystickFinger.current;
+
+      // If joystick finger is gone but didn't trigger release properly, reset it
+      const stillPressed = evt.nativeEvent.touches.some(t => t.identifier === joyID);
+
+      if (!stillPressed && joyID !== null) {
+        joystickFinger.current = null;
+        setJoystick({ dx: 0, dy: 0 });
+        setKnobPos({ x: JOYSTICK_X, y: JOYSTICK_Y });
+        return;
+      }
+
+      // Continue joystick movement
+      if (joyID !== null) {
+        const joyTouch = evt.nativeEvent.touches.find(t => t.identifier === joyID);
+        if (joyTouch) {
+          const dx = joyTouch.locationX - JOYSTICK_X;
+          const dy = joyTouch.locationY - JOYSTICK_Y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          if (distance < JOYSTICK_RADIUS) handleJoystick(joyTouch);
+        }
+      }
+    },
+
+    onPanResponderRelease: (evt) => {
+      const joyID = joystickFinger.current;
+
+      // If the joystick finger is one of the released ones → reset
+      const releasedIDs = evt.nativeEvent.changedTouches.map(t => t.identifier);
+
+      if (releasedIDs.includes(joyID)) {
+        joystickFinger.current = null;
+        setJoystick({ dx: 0, dy: 0 });
+        setKnobPos({ x: JOYSTICK_X, y: JOYSTICK_Y });
+      }
+
+      // If NO touches are left, always reset joystick
+      if (evt.nativeEvent.touches.length === 0) {
+        joystickFinger.current = null;
+        setJoystick({ dx: 0, dy: 0 });
+        setKnobPos({ x: JOYSTICK_X, y: JOYSTICK_Y });
+      }
     },
   });
+
+
 
   const handleJoystick = (touch) => {
     const dx = touch.locationX - JOYSTICK_X;
@@ -144,7 +175,6 @@ export default function App() {
       });
     }
   };
-
 
   // --- Game update ---
   const UpdateSystem = () => {
@@ -198,17 +228,28 @@ export default function App() {
   };
 
   const handleBallControl = (touchX, touchY) => {
-    if (touchX > SCREEN_WIDTH * 0.7 && touchY > SCREEN_HEIGHT * 0.6) {
-      const relativeY = touchY - SCREEN_HEIGHT * 0.6;
-      if (relativeY < 40) {
-        // toss ball up
-        setEntities((prev) => ({ ...prev, ball: { ...prev.ball, y: prev.ball.y - BALL_TOSS_DISTANCE } }));
-        setPlayerHasBall(false);
-      } else {
-        // toss ball down
-        setEntities((prev) => ({ ...prev, ball: { ...prev.ball, y: prev.ball.y + BALL_TOSS_DISTANCE } }));
-        setPlayerHasBall(false);
-      }
+    if (tossRef.current.active) return;
+
+    if (touchX > SCREEN_WIDTH * 0.6 && touchY > SCREEN_HEIGHT * 0.6) {
+      const tossDirection = touchY < BALL_UP_Y ? "up" : "down";
+
+      const latestBallX = entities.ball.x;
+      const latestBallY = entities.ball.y;
+
+      tossRef.current = {
+        active: true,
+        direction: tossDirection,
+        frame: 0,
+        startX: latestBallX,
+        startY: latestBallY,
+        targetX: latestBallX,
+        targetY:
+          tossDirection === "up"
+            ? latestBallY - BALL_TOSS_DISTANCE
+            : latestBallY + BALL_TOSS_DISTANCE,
+      };
+
+      setPlayerHasBall(false);
     }
   };
 
@@ -217,6 +258,7 @@ export default function App() {
   };
 
   return (
+    
     <View style={styles.container} {...panResponder.panHandlers}>
       <GameEngine style={styles.gameContainer} systems={[UpdateSystem]} entities={entities}>
         {/* Draw control circles */}
